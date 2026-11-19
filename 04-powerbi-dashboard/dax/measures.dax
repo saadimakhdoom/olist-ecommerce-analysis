@@ -1,0 +1,171 @@
+// =====================================================================
+// Olist E-commerce | Phase 4: Power BI model - DAX
+//
+// Tables (the PostgreSQL reporting views, loaded under the same names)
+//   pbi_fact_sales   one row per item sold
+//   pbi_fact_orders  one row per delivered order
+//   pbi_dim_state    one row per state
+//   pbi_dim_seller   one row per seller
+//   dim_date         calendar table, created below
+//
+// Relationships (one-to-many, single direction)
+//   pbi_dim_state[state_code]  -> pbi_fact_sales[customer_state]
+//   pbi_dim_state[state_code]  -> pbi_fact_orders[customer_state]
+//   pbi_dim_seller[seller_id]  -> pbi_fact_sales[seller_id]
+//   dim_date[Date]         -> pbi_fact_sales[purchase_date]
+//   dim_date[Date]         -> pbi_fact_orders[purchase_date]
+// =====================================================================
+
+
+// ---------------------------------------------------------------------
+// Calculated table: dim_date
+// Covers the analysis window (Jan 2017 - Aug 2018). Marked as the
+// model's date table so time-intelligence functions work.
+// ---------------------------------------------------------------------
+dim_date =
+ADDCOLUMNS (
+    CALENDAR ( DATE ( 2017, 1, 1 ), DATE ( 2018, 8, 31 ) ),
+    "Year",           YEAR ( [Date] ),
+    "Month Number",   MONTH ( [Date] ),
+    "Month",          FORMAT ( [Date], "mmm yyyy" ),
+    "Month Start",    DATE ( YEAR ( [Date] ), MONTH ( [Date] ), 1 ),
+    "Weekday",        FORMAT ( [Date], "dddd" ),
+    "Weekday Number", WEEKDAY ( [Date], 2 )
+)
+
+
+// ---------------------------------------------------------------------
+// Sales measures (item grain: pbi_fact_sales)
+// ---------------------------------------------------------------------
+Revenue = SUM ( pbi_fact_sales[price] )
+
+Freight = SUM ( pbi_fact_sales[freight_value] )
+
+Orders = DISTINCTCOUNT ( pbi_fact_sales[order_id] )
+
+Customers = DISTINCTCOUNT ( pbi_fact_sales[customer_unique_id] )
+
+Active Sellers = DISTINCTCOUNT ( pbi_fact_sales[seller_id] )
+
+Items Sold = COUNTROWS ( pbi_fact_sales )
+
+Avg Order Value = DIVIDE ( [Revenue], [Orders] )
+
+Items per Order = DIVIDE ( [Items Sold], [Orders] )
+
+Freight % of Price = DIVIDE ( [Freight], [Revenue] )
+
+// Share of total revenue, ignoring all filters (state, seller, date, category)
+Revenue % of Total =
+DIVIDE ( [Revenue], CALCULATE ( [Revenue], REMOVEFILTERS () ) )
+
+Revenue Last Year =
+CALCULATE ( [Revenue], SAMEPERIODLASTYEAR ( dim_date[Date] ) )
+
+Revenue YoY % =
+DIVIDE ( [Revenue] - [Revenue Last Year], [Revenue Last Year] )
+
+// Share of customers who placed more than one order
+Repeat Customer % =
+VAR CustomerList = VALUES ( pbi_fact_sales[customer_unique_id] )
+VAR RepeatCustomers =
+    COUNTROWS (
+        FILTER ( CustomerList, CALCULATE ( DISTINCTCOUNT ( pbi_fact_sales[order_id] ) ) > 1 )
+    )
+RETURN
+    DIVIDE ( RepeatCustomers, COUNTROWS ( CustomerList ) )
+
+
+// ---------------------------------------------------------------------
+// Revenue target (fixed goal of R$15M for the analysis window)
+// ---------------------------------------------------------------------
+Target Revenue = 15000000
+
+Revenue vs Target = [Revenue] - [Target Revenue]
+
+% of Target = DIVIDE ( [Revenue], [Target Revenue] )
+
+
+// ---------------------------------------------------------------------
+// Delivery and review measures (order grain: pbi_fact_orders)
+// ---------------------------------------------------------------------
+Delivered Orders = COUNTROWS ( pbi_fact_orders )
+
+Avg Delivery Days = AVERAGE ( pbi_fact_orders[delivery_days] )
+
+// is_late is 1 / 0, blank where timeliness is unknown
+Late % = DIVIDE ( SUM ( pbi_fact_orders[is_late] ), COUNT ( pbi_fact_orders[is_late] ) )
+
+Avg Review = AVERAGE ( pbi_fact_orders[review_score] )
+
+Negative Review % =
+DIVIDE (
+    CALCULATE ( COUNT ( pbi_fact_orders[review_score] ), pbi_fact_orders[review_score] <= 2 ),
+    COUNT ( pbi_fact_orders[review_score] )
+)
+
+
+// ---------------------------------------------------------------------
+// Calculated columns
+// ---------------------------------------------------------------------
+// pbi_dim_state: location text the map visual can geocode
+Map Location = pbi_dim_state[state_name] & ", Brazil"
+
+// pbi_fact_orders: readable delivery status (blank is_late = unknown)
+Delivery Status =
+IF (
+    ISBLANK ( pbi_fact_orders[is_late] ),
+    "Unknown",
+    IF ( pbi_fact_orders[is_late] = 1, "Late", "On time" )
+)
+
+
+// ---------------------------------------------------------------------
+// Period comparison (same months each year, no date table required)
+// ---------------------------------------------------------------------
+Revenue Jan-Aug 2017 =
+CALCULATE ( [Revenue],
+    pbi_fact_sales[purchase_date] >= DATE ( 2017, 1, 1 ),
+    pbi_fact_sales[purchase_date] <= DATE ( 2017, 8, 31 ) )
+
+Revenue Jan-Aug 2018 =
+CALCULATE ( [Revenue],
+    pbi_fact_sales[purchase_date] >= DATE ( 2018, 1, 1 ),
+    pbi_fact_sales[purchase_date] <= DATE ( 2018, 8, 31 ) )
+
+Growth % (Jan-Aug) =
+DIVIDE ( [Revenue Jan-Aug 2018] - [Revenue Jan-Aug 2017], [Revenue Jan-Aug 2017] )
+
+
+// ---------------------------------------------------------------------
+// Pareto: running share of revenue, largest state first
+// ---------------------------------------------------------------------
+Cumulative Revenue % =
+VAR CurrentRevenue = [Revenue]
+VAR AllStates = ALLSELECTED ( pbi_dim_state[state_code] )
+VAR RunningTotal =
+    SUMX ( FILTER ( AllStates, CALCULATE ( [Revenue] ) >= CurrentRevenue ), CALCULATE ( [Revenue] ) )
+RETURN
+    DIVIDE ( RunningTotal, CALCULATE ( [Revenue], AllStates ) )
+
+
+// ---------------------------------------------------------------------
+// Seller measures (pbi_dim_seller)
+// ---------------------------------------------------------------------
+Seller Count = COUNTROWS ( pbi_dim_seller )
+
+% of Sellers =
+DIVIDE ( [Seller Count], CALCULATE ( [Seller Count], ALL ( pbi_dim_seller ) ) )
+
+Inactive Sellers % =
+DIVIDE ( CALCULATE ( [Seller Count], pbi_dim_seller[activity_status] = "Inactive" ), [Seller Count] )
+
+
+// ---------------------------------------------------------------------
+// Core market (Southeast + South) vs rest of Brazil
+// ---------------------------------------------------------------------
+Freight % Core =
+CALCULATE ( [Freight % of Price], pbi_dim_state[region] IN { "Southeast", "South" } )
+
+Freight % Outside Core =
+CALCULATE ( [Freight % of Price], NOT pbi_dim_state[region] IN { "Southeast", "South" } )

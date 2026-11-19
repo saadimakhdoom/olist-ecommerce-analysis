@@ -1,0 +1,5 @@
+﻿# Personal study notes - not part of the published projects
+_personal-notes/
+
+# Exported data for Power BI (re-create from the SQL views; the .pbix holds the data)
+04-powerbi-dashboard/data/
